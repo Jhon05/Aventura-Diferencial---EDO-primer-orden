@@ -187,3 +187,52 @@ Juego educativo 2D tipo aventura cenital para evaluar el primer corte de Ecuacio
 - El informe ahora reconoce correctamente `\( ... \)`, `$ ... $`, `\[ ... \]` y `$$ ... $$`.
 - El formulario teórico ya no debe mostrar código literal como `\(y^{\prime}...\)`.
 - El proyecto sigue plano para GitHub: todos los archivos están en la raíz, sin carpeta `src`.
+
+
+## V35 - Bloqueos preventivos exactos
+
+- Los bloqueos preventivos se activan únicamente durante la partida por:
+  1. presionar `Escape`,
+  2. hacer clic derecho,
+  3. presionar `PrintScreen` / pantallazo.
+- Al activarse un bloqueo aparece un panel con contraseña docente. El campo muestra `****`.
+- La contraseña corresponde a la hora militar actual, pero esta regla no se muestra en la interfaz.
+- Cada bloqueo cuenta como una señal preventiva. Se permiten máximo 5 señales; si se supera ese límite, el quiz se anula con nota 0.
+- No hay bloqueo automático al iniciar el juego ni por estar fuera de pantalla completa.
+
+
+## V36 - Pantalla completa y desbloqueo corregidos
+
+- Al hacer clic normal durante la partida, el juego intenta volver a pantalla completa.
+- Escape, clic derecho, PrintScreen y cambio de foco activan un bloqueo preventivo.
+- Para desbloquear, el docente escribe la contraseña oculta en el campo `****`.
+- La contraseña corresponde a la hora militar actual, con tolerancia de algunos minutos, pero esta regla no se muestra en la interfaz.
+- Se permiten 5 señales preventivas. La sexta señal anula el quiz con nota 0.
+
+
+## V37 - Contraseña docente robusta
+
+- Se corrigió la validación de contraseña docente para aceptar formatos `HHMM`, `HH:MM`, `HMM` y equivalentes de 12/24 horas.
+- Se agregó tolerancia de minutos y respaldo de zona horaria para evitar que el docente quede bloqueado por diferencias del reloj del navegador.
+- El campo de contraseña sigue mostrando `****` y la regla no se muestra en la interfaz.
+- Al desbloquear, el juego vuelve a intentar entrar en pantalla completa.
+
+
+## V38 - Desbloqueo continúa el juego
+
+- Al oprimir `Desbloquear y continuar` con la contraseña correcta, el panel se oculta y el juego vuelve inmediatamente al modo de juego.
+- Se añadió una tolerancia corta después del desbloqueo para evitar que eventos del navegador vuelvan a bloquear justo después de hacer clic.
+- El juego intenta volver a pantalla completa después del desbloqueo.
+
+## V39 - Botón de desbloqueo docente corregido
+
+- Se conectó el botón `Desbloquear y continuar` con la función real de validación.
+- También se puede desbloquear presionando Enter dentro del campo de contraseña.
+- Después de validar la hora militar correcta, el panel se oculta, el bloqueo se limpia y el juego vuelve al modo de juego.
+
+## V40 - Anulación automática en la quinta señal
+
+- Al llegar a 5 señales de bloqueo, el intento se finaliza automáticamente.
+- La nota final queda fijada en `0.0` y el estado del informe muestra un aviso rojo de `QUIZ ANULADO`.
+- El informe HTML se descarga automáticamente al momento de la anulación.
+- El informe conserva el historial de respuestas, aciertos, errores, sellos, objetos, mundo alcanzado, posición final del avatar, tema activo y puntaje desarrollado antes de la anulación.

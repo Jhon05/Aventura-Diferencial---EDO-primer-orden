@@ -14,6 +14,7 @@
   const TOPICS = ['pvi','separables','exactas','lineales','aplicaciones'];
   const SCORE_CORRECT = 0.1;
   const SCORE_WRONG = -0.1;
+  const SECURITY_SIGNAL_LIMIT = 5;
 
   const els = {
     root: document.getElementById('game-root'),
@@ -123,9 +124,12 @@
     securityMessage:'',
     securitySignals:0,
     quizInvalidated:false,
+    invalidationReason:'',
+    preInvalidationGrade:null,
     worldScoreGain:{},
     securityUnlockRequired:false,
-    lastSecuritySignalAt:0
+    lastSecuritySignalAt:0,
+    securityUnlockGraceUntil:0
   };
 
   function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
@@ -186,7 +190,13 @@
       }
       if(k==='escape') closeTopPanel();
     });
-    window.addEventListener('keyup',e=>{state.keys[e.key.toLowerCase()]=false;});
+    window.addEventListener('keyup',e=>{
+      const k=e.key.toLowerCase();
+      state.keys[k]=false;
+      if(state.mode!=='menu' && !!state.startTime && !state.teacherUnlocked && k==='printscreen'){
+        triggerSecurityLock('Bloqueo por pantallazo.', 'Actividad bloqueada por intento de pantallazo; escriba la contraseña docente para continuar.');
+      }
+    });
     document.addEventListener('contextmenu',e=>{
       if(state.mode!=='menu' && !!state.startTime && !state.teacherUnlocked){
         e.preventDefault();
@@ -205,6 +215,30 @@
       }
     }));
 
+    document.addEventListener('pointerdown',()=>{
+      if(state.mode!=='menu' && !state.securityLocked && !state.quizInvalidated){
+        requestGameFullscreen();
+      }
+    });
+
+    document.addEventListener('fullscreenchange',()=>{
+      if(state.mode!=='menu' && !!state.startTime && !state.teacherUnlocked && !state.quizInvalidated && Date.now() >= (state.securityUnlockGraceUntil||0) && !document.fullscreenElement){
+        triggerSecurityLock('Bloqueo por salida de pantalla completa.', 'Actividad bloqueada por salida de pantalla completa; escriba la contraseña docente para continuar.');
+      }
+    });
+
+    document.addEventListener('visibilitychange',()=>{
+      if(state.mode!=='menu' && !!state.startTime && !state.teacherUnlocked && !state.quizInvalidated && Date.now() >= (state.securityUnlockGraceUntil||0) && document.hidden){
+        triggerSecurityLock('Bloqueo por cambio de foco.', 'Actividad bloqueada por cambio de foco; escriba la contraseña docente para continuar.');
+      }
+    });
+
+    window.addEventListener('blur',()=>{
+      if(state.mode!=='menu' && !!state.startTime && !state.teacherUnlocked && !state.quizInvalidated && Date.now() >= (state.securityUnlockGraceUntil||0)){
+        triggerSecurityLock('Bloqueo por cambio de foco.', 'Actividad bloqueada por cambio de foco; escriba la contraseña docente para continuar.');
+      }
+    });
+
     els.startBtn.addEventListener('click',startGame);
     els.howToBtn.addEventListener('click',()=>els.howToPanel.classList.remove('hidden'));
     els.closeHowTo.addEventListener('click',()=>els.howToPanel.classList.add('hidden'));
@@ -217,7 +251,23 @@
     });
     els.hintBtn.addEventListener('click',showQuestionHint);
     els.submitAnswer.addEventListener('click',submitAnswer);
-    els.continueBtn.addEventListener('click',()=>{els.reportPanel.classList.add('hidden');state.mode='playing';});
+    // V39: el botón del panel de seguridad no tenía evento asociado,
+    // por eso la contraseña correcta se escribía pero no continuaba el juego.
+    els.unlockSecurityBtn?.addEventListener('click', e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      unlockSecurityWithPassword();
+    });
+    els.teacherPasswordInput?.addEventListener('keydown', e=>{
+      if(e.key==='Enter'){
+        e.preventDefault();
+        unlockSecurityWithPassword();
+      }
+    });
+    els.continueBtn.addEventListener('click',()=>{
+      if(state.quizInvalidated){showToast('El quiz fue anulado con nota 0. No se puede continuar.',3);return;}
+      els.reportPanel.classList.add('hidden');state.mode='playing';
+    });
     els.printBtn.addEventListener('click',()=>{if(requireTeacherAccess('Imprimir o guardar informe')) window.print();});
     els.restartBtn.addEventListener('click',()=>{if(requireTeacherAccess('Reiniciar la actividad')) location.reload();});
     els.downloadJsonBtn.addEventListener('click',()=>{if(requireTeacherAccess('Descargar JSON del informe')) downloadReportJson();});
@@ -240,13 +290,17 @@
   function closeTopPanel(){
     if(!els.qModal.classList.contains('hidden')) {showToast('Debes responder la pregunta para poder continuar.',2.5); return;}
     if(!els.rescuePanel.classList.contains('hidden')) return;
-    if(!els.reportPanel.classList.contains('hidden')){els.reportPanel.classList.add('hidden');state.mode='playing';return;}
+    if(!els.reportPanel.classList.contains('hidden')){
+      if(state.quizInvalidated){showToast('El quiz fue anulado con nota 0. No se puede continuar.',3);return;}
+      els.reportPanel.classList.add('hidden');state.mode='playing';return;
+    }
     if(!els.howToPanel.classList.contains('hidden')){els.howToPanel.classList.add('hidden');return;}
     if(!els.routePanel.classList.contains('hidden')){els.routePanel.classList.add('hidden');return;}
   }
 
   function startGame(){
     requestGameFullscreen();
+    setTimeout(()=>requestGameFullscreen(),120);
     state.studentName=els.studentName.value.trim()||'Estudiante';
     const mode=els.controlMode.value;
     state.mobile=mode==='mobile'||(mode==='auto'&&(matchMedia('(pointer:coarse)').matches||window.innerWidth<760));
@@ -280,19 +334,47 @@
     return e.key==='F12' || (e.ctrlKey && e.shiftKey && ['i','j','c'].includes(k)) || (e.ctrlKey && ['u','s','p'].includes(k)) || (e.metaKey && ['s','p'].includes(k));
   }
 
+  function normalizeTeacherPassword(value){
+    const digits=String(value||'').replace(/\D/g,'');
+    if(digits.length===3) return digits.padStart(4,'0');
+    return digits;
+  }
+
+  function timePasswordFromParts(hours,minutes){
+    const h24=((hours%24)+24)%24;
+    const h12=h24%12 || 12;
+    const mm=String(minutes).padStart(2,'0');
+    return [
+      `${String(h24).padStart(2,'0')}${mm}`,
+      `${String(h12).padStart(2,'0')}${mm}`,
+      `${String(h12)}${mm}`
+    ];
+  }
+
   function militaryPassword(date=new Date()){
     return `${String(date.getHours()).padStart(2,'0')}${String(date.getMinutes()).padStart(2,'0')}`;
   }
 
   function validTeacherPasswords(){
-    return Array.from(new Set([-1,0,1].map(offset=>militaryPassword(new Date(Date.now()+offset*60000)))));
+    const passwords=new Set();
+    // Tolerancia amplia para evitar fallos por minuto, zona horaria o reloj del navegador.
+    for(let offset=-20; offset<=20; offset++){
+      const local=new Date(Date.now()+offset*60000);
+      timePasswordFromParts(local.getHours(),local.getMinutes()).forEach(p=>passwords.add(p));
+      const utc=new Date(Date.now()+offset*60000);
+      timePasswordFromParts(utc.getUTCHours(),utc.getUTCMinutes()).forEach(p=>passwords.add(p));
+      // Colombia/Bogotá: UTC-5. Se agrega como respaldo cuando el navegador está en otra zona.
+      const bogota=new Date(Date.now()+offset*60000-5*60*60000);
+      timePasswordFromParts(bogota.getUTCHours(),bogota.getUTCMinutes()).forEach(p=>passwords.add(p));
+    }
+    return Array.from(passwords);
   }
 
   function promptTeacherAccess(reason='Acción docente'){
     const raw=window.prompt(`${reason}
 Acceso restringido.`);
     if(raw===null) return false;
-    const attempt=String(raw).trim().replace(/\s+/g,'');
+    const attempt=normalizeTeacherPassword(raw);
     if(validTeacherPasswords().includes(attempt)){
       state.teacherUnlocked=true;
       showToast('Acceso docente concedido.',2.2);
@@ -315,36 +397,42 @@ Acceso restringido.`);
     const now=Date.now();
     if(now-state.lastSecuritySignalAt<1200) return false;
     state.lastSecuritySignalAt=now;
-    state.securitySignals++;
-    state.securityMessage = `${reason} Señal ${state.securitySignals}/5.`;
+    state.securitySignals=Math.min(SECURITY_SIGNAL_LIMIT, state.securitySignals+1);
+    state.securityMessage = `${reason} Señal ${state.securitySignals}/${SECURITY_SIGNAL_LIMIT}.`;
     updateSecurityPanel();
-    if(state.securitySignals>5){
+    if(state.securitySignals>=SECURITY_SIGNAL_LIMIT){
       invalidateQuiz('Superaste el máximo de 5 señales de bloqueo.');
     }
     return true;
   }
 
   function triggerSecurityLock(reason, message){
+    if(Date.now() < (state.securityUnlockGraceUntil||0)) return;
     const counted=addSecuritySignal(reason);
     if(state.quizInvalidated) return;
     state.securityLocked=true;
     state.securityUnlockRequired=true;
     state.securityMessage = message || 'Actividad bloqueada. Escriba la contraseña docente para continuar.';
     updateSecurityPanel();
+    setTimeout(()=>els.teacherPasswordInput?.focus(),50);
     if(counted) showToast(state.securityMessage,3);
   }
 
   function invalidateQuiz(reason){
+    if(state.quizInvalidated) return;
+    state.preInvalidationGrade=Number(state.grade||0);
     state.quizInvalidated=true;
-    state.securityLocked=true;
-    state.securityUnlockRequired=true;
+    state.invalidationReason=reason || 'Se alcanzó el límite de señales de bloqueo.';
+    state.securityLocked=false;
+    state.securityUnlockRequired=false;
+    state.securitySignals=SECURITY_SIGNAL_LIMIT;
     state.grade=0;
-    state.securityMessage=`${reason} El quiz fue anulado con nota 0.`;
+    state.securityMessage=`${state.invalidationReason} El quiz fue anulado con nota 0.`;
+    [els.qModal, els.rescuePanel, els.victoryPanel, els.securityPanel].forEach(panel=>panel?.classList.add('hidden'));
     updateHUD();
     updateSecurityPanel();
-    SCORM?.saveScore?.(state.grade,state.answered);
-    SCORM?.finish?.();
-    showToast('Quiz anulado: superaste el máximo de señales de bloqueo. Nota 0.',5);
+    showToast('QUIZ ANULADO: llegaste a 5 señales de bloqueo. Nota final 0.0.',6);
+    showReport(true);
   }
 
   function updateSecurityPanel(){
@@ -352,7 +440,7 @@ Acceso restringido.`);
     els.securityPanel.classList.toggle('hidden', !state.securityLocked);
     els.securityPanel.classList.toggle('quiz-invalidated', !!state.quizInvalidated);
     els.securityMessageText.textContent=state.securityMessage || 'Actividad bloqueada. Escriba la contraseña docente para continuar.';
-    els.securitySignalsText.textContent=`${Math.min(state.securitySignals,6)}/5`;
+    els.securitySignalsText.textContent=`${Math.min(state.securitySignals,SECURITY_SIGNAL_LIMIT)}/${SECURITY_SIGNAL_LIMIT}`;
   }
 
   function unlockSecurityWithPassword(){
@@ -360,23 +448,28 @@ Acceso restringido.`);
       showToast('El quiz ya fue anulado con nota 0. No se puede continuar.',3);
       return;
     }
-    const attempt=(els.teacherPasswordInput?.value||'').trim().replace(/\s+/g,'');
+    const attempt=normalizeTeacherPassword(els.teacherPasswordInput?.value||'');
     if(validTeacherPasswords().includes(attempt)){
       state.securityLocked=false;
       state.securityUnlockRequired=false;
       state.securityMessage='';
+      state.securityUnlockGraceUntil=Date.now()+4500;
       els.teacherPasswordInput.value='';
       updateSecurityPanel();
+      els.securityPanel?.classList.add('hidden');
+      if(state.mode!=='menu' && state.mode!=='report') state.mode='playing';
+      Object.keys(state.keys||{}).forEach(k=>state.keys[k]=false);
+      updateHUD();
+      requestGameFullscreen();
+      setTimeout(()=>requestGameFullscreen(),250);
       showToast('Validación docente correcta. Puedes continuar.',2.2);
     } else {
-      addSecuritySignal('Contraseña docente incorrecta.');
-      if(!state.quizInvalidated){
-        state.securityLocked=true;
-        state.securityUnlockRequired=true;
-        state.securityMessage='Contraseña incorrecta. Escriba la contraseña docente para continuar.';
-        updateSecurityPanel();
-        showToast('Contraseña docente incorrecta.',2.5);
-      }
+      state.securityLocked=true;
+      state.securityUnlockRequired=true;
+      state.securityMessage='Contraseña incorrecta. Escriba la contraseña docente para continuar.';
+      updateSecurityPanel();
+      setTimeout(()=>els.teacherPasswordInput?.focus(),30);
+      showToast('Contraseña docente incorrecta.',2.5);
     }
   }
 
@@ -2282,27 +2375,38 @@ Acceso restringido.`);
     state.answered.forEach(a=>{byTopic[a.topic] ||= {topic:a.topic,name:a.topic,total:0,correct:0};byTopic[a.topic].total++;if(a.correct)byTopic[a.topic].correct++;});
     const total=state.answered.length, correct=state.correct;
     const weak=Object.values(byTopic).filter(t=>t.total>0&&t.correct/t.total<.7).map(t=>t.name);
-    return {student:state.studentName,date:new Date().toLocaleString('es-CO'),finished,
-      invalidated:state.quizInvalidated,
-      securitySignals:state.securitySignals,grade:+state.grade.toFixed(2),total,correct,wrong:state.wrong,accuracy:total?correct/total:0,time:formatTime(state.elapsed),seals:[...state.seals],inventory:[...state.inventory],byTopic:Object.values(byTopic),weak,answers:state.answered,completed:state.gameCompleted};
+    const gradeBeforeInvalidation=state.preInvalidationGrade===null?Number(state.grade||0):Number(state.preInvalidationGrade||0);
+    const playerTile={x:Math.floor((state.player?.x||0)/TILE),y:Math.floor((state.player?.y||0)/TILE)};
+    return {student:state.studentName,date:new Date().toLocaleString('es-CO'),finished: finished || state.quizInvalidated,
+      invalidated:state.quizInvalidated,invalidationReason:state.invalidationReason,
+      securitySignals:Math.min(state.securitySignals,SECURITY_SIGNAL_LIMIT),securityLimit:SECURITY_SIGNAL_LIMIT,
+      grade:+(state.quizInvalidated?0:state.grade).toFixed(2),gradeBeforeInvalidation:+gradeBeforeInvalidation.toFixed(2),
+      total,correct,wrong:state.wrong,accuracy:total?correct/total:0,time:formatTime(state.elapsed),
+      seals:[...state.seals],inventory:[...state.inventory],
+      currentWorld:state.scene?.name || 'Reino principal',currentWorldId:state.scene?.id || 'world',currentTopic:TOPIC_META[state.currentTopic]?.topicLabel || state.currentTopic,
+      playerTile,worldScoreGain:{...state.worldScoreGain},byTopic:Object.values(byTopic),weak,answers:state.answered,completed:state.gameCompleted};
   }
+
   function renderReportHTML(r){
-    const rows=r.byTopic.filter(t=>t.total>0).map(t=>`<tr><td>${t.name}</td><td>${t.correct}/${t.total}</td><td>${t.total?Math.round(100*t.correct/t.total):0}%</td></tr>`).join('')||'<tr><td colspan="3">Aún no hay respuestas.</td></tr>';
-    const rec=r.weak.length?`Reforzar: ${r.weak.join(', ')}. Identifica primero la forma de la ecuación, el método y luego ejecuta el procedimiento.`:'Buen desempeño en los temas respondidos. Continúa con ejercicios integradores.';
-    return `<div class="report-grid">
+    const rows=r.byTopic.filter(t=>t.total>0).map(t=>`<tr><td>${escapeHTML(t.name)}</td><td>${t.correct}/${t.total}</td><td>${t.total?Math.round(100*t.correct/t.total):0}%</td></tr>`).join('')||'<tr><td colspan="3">Aún no hay respuestas.</td></tr>';
+    const rec=r.weak.length?`Reforzar: ${r.weak.map(escapeHTML).join(', ')}. Identifica primero la forma de la ecuación, el método y luego ejecuta el procedimiento.`:'Buen desempeño en los temas respondidos. Continúa con ejercicios integradores.';
+    const invalidatedAlert=r.invalidated?`<div class="quiz-annulled-alert"><strong>QUIZ ANULADO</strong><br>Se alcanzaron ${r.securitySignals}/${r.securityLimit||5} señales de bloqueo. La nota final queda fijada en <b>0.0</b>. Nota antes de anular: <b>${r.gradeBeforeInvalidation.toFixed(1)}</b>.</div>`:'';
+    const progressRows=`<table class="report-table"><tbody><tr><th>Mundo alcanzado</th><td>${escapeHTML(r.currentWorld)}</td></tr><tr><th>Tema activo</th><td>${escapeHTML(r.currentTopic)}</td></tr><tr><th>Objetos obtenidos</th><td>${r.inventory.length?r.inventory.map(escapeHTML).join(', '):'ninguno'}</td></tr><tr><th>Posición del avatar</th><td>Casilla (${r.playerTile.x}, ${r.playerTile.y})</td></tr></tbody></table>`;
+    return `${invalidatedAlert}<div class="report-grid">
       <div class="report-metric"><span>Estudiante</span><strong style="font-size:1.05rem">${escapeHTML(r.student)}</strong></div>
       <div class="report-metric"><span>Nota</span><strong>${r.grade.toFixed(1)}</strong></div>
       <div class="report-metric"><span>Precisión</span><strong>${Math.round(r.accuracy*100)}%</strong></div>
       <div class="report-metric"><span>Tiempo</span><strong>${r.time}</strong></div>
     </div>
-    <p><b>Fecha:</b> ${r.date}. <b>Aciertos:</b> ${r.correct}. <b>Errores:</b> ${r.wrong}. <b>Sellos:</b> ${r.seals.filter(s=>s!=='boss').length}/5.</p>${r.invalidated?'<p><b>Estado:</b> quiz anulado por superar las señales de bloqueo. Nota: <b>0.0</b>.</p>':(r.finished?'<p><b>Estado:</b> juego finalizado. Si derrotó el monstruo final, la nota definitiva quedó fijada en <b>5.0</b>.</p>':'')}<p><b>Señales de bloqueo:</b> ${r.securitySignals}/5.</p>
+    <p><b>Fecha:</b> ${escapeHTML(r.date)}. <b>Aciertos:</b> ${r.correct}. <b>Errores:</b> ${r.wrong}. <b>Sellos:</b> ${r.seals.filter(s=>s!=='boss').length}/5.</p>${r.invalidated?'<p class="report-status-danger"><b>Estado:</b> QUIZ ANULADO por superar las señales de bloqueo. Nota final: <b>0.0</b>.</p>':(r.finished?'<p><b>Estado:</b> juego finalizado. Si derrotó el monstruo final, la nota definitiva quedó fijada en <b>5.0</b>.</p>':'')}<p><b>Señales de bloqueo:</b> ${r.securitySignals}/${r.securityLimit||5}.</p>
+    ${progressRows}
     <table class="report-table"><thead><tr><th>Tema</th><th>Aciertos</th><th>Rendimiento</th></tr></thead><tbody>${rows}</tbody></table>
-    <p><b>Objetos obtenidos:</b> ${r.inventory.length?r.inventory.join(', '):'ninguno todavía'}.</p>
     <p><b>Plan de mejora:</b> ${rec}</p>
-    <details><summary>Historial de respuestas</summary><table class="report-table"><thead><tr><th>#</th><th>Tema</th><th>Tipo</th><th>Resultado</th><th>Nota</th></tr></thead><tbody>${r.answers.map((a,i)=>`<tr><td>${i+1}</td><td>${TOPIC_META[a.topic]?.topicLabel||a.topic}</td><td>${questionTypeLabel(a.type)}</td><td>${a.correct?'Correcta':'Incorrecta'}</td><td>${a.grade.toFixed(1)}</td></tr>`).join('')}</tbody></table></details>`;
+    <details><summary>Historial de respuestas</summary><table class="report-table"><thead><tr><th>#</th><th>Tema</th><th>Tipo</th><th>Resultado</th><th>Nota</th></tr></thead><tbody>${r.answers.map((a,i)=>`<tr><td>${i+1}</td><td>${escapeHTML(TOPIC_META[a.topic]?.topicLabel||a.topic)}</td><td>${escapeHTML(questionTypeLabel(a.type))}</td><td>${a.correct?'Correcta':'Incorrecta'}</td><td>${Number(a.grade).toFixed(1)}</td></tr>`).join('')}</tbody></table></details>`;
   }
 
   function reportStatusLabel(r){
+    if(r.invalidated) return 'QUIZ ANULADO POR 5 SEÑALES DE BLOQUEO';
     if(r.completed) return 'Monstruo final derrotado';
     if(r.finished) return 'Partida finalizada por el estudiante';
     return 'Partida registrada';
@@ -2329,8 +2433,11 @@ Acceso restringido.`);
     const rows=r.byTopic.filter(t=>t.total>0).map(t=>`<tr><td>${escapeHTML(t.name)}</td><td>${t.correct}/${t.total}</td><td>${t.total?Math.round(100*t.correct/t.total):0}%</td></tr>`).join('')||'<tr><td colspan="3">Aún no hay respuestas.</td></tr>';
     const rec=r.weak.length?`<ul>${r.weak.map(w=>`<li><strong>${escapeHTML(w)}:</strong> repasa el método, la interpretación y las condiciones de aplicación.</li>`).join('')}<li>Antes de responder, clasifica la ecuación y escribe el procedimiento esperado.</li></ul>`:'<p>Buen desempeño general. Continúa con ejercicios integradores y problemas donde se combinen varios métodos.</p>';
     const detail=r.answers.map((a,i)=>`<article class="question-card"><div class="qtop"><span>${i+1}</span><div><h3>${escapeHTML(TOPIC_META[a.topic]?.topicLabel||a.topic)} · ${escapeHTML(questionTypeLabel(a.type))}</h3><p>${escapeHTML(a.trap?'Pregunta de liberación':'Reto del juego')}</p></div><b class="${a.correct?'ok':'bad'}">${a.correct?'Correcta':'Incorrecta'} · ${a.delta>0?'+':''}${a.delta}</b></div><div class="latex">${reportEscapeMathText(a.prompt)}</div><div class="twocol"><div><h4>Respuesta del estudiante</h4><div class="latex">${reportDisplayAnswer(a)}</div></div><div><h4>Nota después de responder</h4><div class="latex">${reportMath(Number(a.grade).toFixed(1))}</div></div></div></article>`).join('')||'<p>No se registraron preguntas.</p>';
+    const invalidatedNotice=r.invalidated?`<section class="section invalidated-section"><h2>QUIZ ANULADO</h2><p><strong>${escapeHTML(r.invalidationReason||'Se alcanzó el límite de señales de bloqueo.')}</strong></p><p>Se registraron ${r.securitySignals}/${r.securityLimit||5} señales de bloqueo. La nota final queda fijada en <strong>0.0</strong>. Nota acumulada antes de la anulación: <strong>${r.gradeBeforeInvalidation.toFixed(2)}</strong>.</p></section>`:'';
+    const gainRows=Object.entries(r.worldScoreGain||{}).map(([k,v])=>`<tr><td>${escapeHTML(TOPIC_META[k]?.topicLabel||k)}</td><td>${Number(v).toFixed(2)}</td></tr>`).join('')||'<tr><td colspan="2">Sin puntaje por mundo registrado.</td></tr>';
+    const progressSection=`<section class="section"><h2>Progreso desarrollado durante el juego</h2><table><tr><th>Dato</th><th>Registro</th></tr><tr><td>Mundo alcanzado</td><td>${escapeHTML(r.currentWorld)}</td></tr><tr><td>Tema activo</td><td>${escapeHTML(r.currentTopic)}</td></tr><tr><td>Sellos obtenidos</td><td>${r.seals.filter(s=>s!=='boss').length}/5 (${r.seals.length?r.seals.map(escapeHTML).join(', '):'ninguno'})</td></tr><tr><td>Objetos obtenidos</td><td>${r.inventory.length?r.inventory.map(escapeHTML).join(', '):'ninguno'}</td></tr><tr><td>Ubicación final del avatar</td><td>Casilla (${r.playerTile.x}, ${r.playerTile.y})</td></tr><tr><td>Señales de bloqueo</td><td>${r.securitySignals}/${r.securityLimit||5}</td></tr><tr><td>Nota antes de anular</td><td>${r.gradeBeforeInvalidation.toFixed(2)}</td></tr></table><h3>Puntaje ganado por mundo antes del cierre</h3><table><tr><th>Mundo/tema</th><th>Puntaje</th></tr>${gainRows}</table></section>`;
     const mjConfig = `<script>window.MathJax={tex:{inlineMath:[['$','$'],['\\\\(','\\\\)']],displayMath:[['$$','$$'],['\\\\[','\\\\]']],processEscapes:true},svg:{fontCache:'global'},startup:{typeset:true}};<\/script><script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"><\/script>`;
-    return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Informe Aventura Diferencial</title>${mjConfig}<style>*{box-sizing:border-box}body{margin:0;background:#f5f8ff;color:#10243d;font-family:Georgia,'Times New Roman',serif;line-height:1.58}.page{width:min(1040px,calc(100% - 24px));margin:22px auto 56px}.hero,.section,.question-card{background:white;border:1px solid #dfe8f5;border-radius:22px;padding:24px;margin:20px 0;box-shadow:0 10px 28px rgba(8,35,74,.07)}.hero{background:linear-gradient(145deg,#06184c,#112f7a);color:white;text-align:center}.hero h1{font-size:clamp(2rem,5vw,4rem);margin:8px 0;color:#ffd866}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric{background:#082d76;color:white;border-radius:16px;padding:16px}.metric b{display:block;font-size:1.7rem;color:#ffd866}h2{color:#062f8a;border-bottom:3px solid #dfe8f5;padding-bottom:8px}.latex,.solution{background:#f7fbff;border:1px solid #dfe8f5;border-radius:14px;padding:13px;margin:10px 0;overflow-x:auto}table{width:100%;border-collapse:collapse;background:white;border-radius:14px;overflow:hidden}td,th{border-bottom:1px solid #e7edf5;padding:10px;text-align:left}th{background:#062f8a;color:white}.qtop{display:flex;gap:12px;align-items:center}.qtop span{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;background:#062f8a;color:white;font-weight:900}.qtop h3{margin:0;color:#062f8a}.qtop p{margin:2px 0 0;color:#5c6f8c}.qtop b{margin-left:auto;padding:8px 13px;border-radius:999px}.ok{background:#e4f8ee;color:#0b754f}.bad{background:#ffe7ed;color:#a80f32}.twocol,.formula-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.formula-block{background:#fbfdff;border:1px solid #dfe8f5;border-radius:16px;padding:14px}.formula-block h3{margin:0 0 10px;color:#0a357d}.formula-block ul{margin:0;padding-left:18px}.formula-block li{margin:8px 0}.footer{text-align:right;color:#667}mjx-container{font-size:118% !important}.latex mjx-container,.solution mjx-container{font-size:122% !important}.formula-block .latex{font-size:1.05rem}@media(max-width:760px){.metrics,.twocol,.formula-grid{grid-template-columns:1fr}.hero,.section,.question-card{padding:16px}}</style></head><body><main class="page"><section class="hero"><div style="font-size:58px">🐉📐</div><h1>Informe Aventura Diferencial</h1><p>Primer corte · Ecuaciones Diferenciales</p><p>${escapeHTML(r.date)}</p></section><section class="section"><h2>Resumen</h2><div class="metrics"><div class="metric"><b>${r.grade.toFixed(2)}</b><span>Nota final / 5.0</span></div><div class="metric"><b>${r.correct}/${r.total}</b><span>Aciertos</span></div><div class="metric"><b>${r.seals.filter(s=>s!=='boss').length}/5</b><span>Sellos</span></div><div class="metric"><b>${r.time}</b><span>Tiempo</span></div></div><p><strong>Estado:</strong> ${reportStatusLabel(r)} · <strong>Errores:</strong> ${r.wrong} · <strong>Precisión:</strong> ${Math.round(r.accuracy*100)}%</p></section><section class="section"><h2>Desempeño por tema</h2><table><tr><th>Tema</th><th>Aciertos</th><th>Porcentaje</th></tr>${rows}</table></section><section class="section"><h2>Plan de mejora</h2>${rec}</section><section class="section"><h2>Formulario teórico en LaTeX</h2><p>Resumen de fórmulas importantes de los temas evaluados en la partida.</p><div class="formula-grid"><div class="formula-block"><h3>PVI</h3><ul><li class="latex">${reportMath('y^{\\prime}=f(x,y),\\quad y(x_0)=y_0')}</li><li>La unicidad local se garantiza con hipótesis suficientes sobre ${reportMath('f')} y ${reportMath('f_y')}.</li></ul></div><div class="formula-block"><h3>Separables</h3><ul><li class="latex">${reportMath('y^{\\prime}=g(x)h(y)\\quad\\Longrightarrow\\quad \\frac{dy}{h(y)}=g(x)\\,dx')}</li></ul></div><div class="formula-block"><h3>Exactas</h3><ul><li class="latex">${reportMath('M(x,y)\\,dx+N(x,y)\\,dy=0,\\quad M_y=N_x')}</li><li>Se busca ${reportMath('F')} con ${reportMath('F_x=M')} y ${reportMath('F_y=N')}.</li></ul></div><div class="formula-block"><h3>Lineales</h3><ul><li class="latex">${reportMath('y^{\\prime}+p(x)y=q(x),\\quad \\mu(x)=e^{\\int p(x)\\,dx}')}</li></ul></div><div class="formula-block"><h3>Aplicaciones</h3><ul><li>Mezclas: ${reportMath('A^{\\prime}(t)=\\text{entrada}-\\text{salida}')}.</li><li>Trayectorias ortogonales: ${reportMath('m_{\\perp}=-\\frac{1}{m}')}.</li></ul></div></div></section><section class="section"><h2>Detalle de preguntas</h2>${detail}</section><p class="footer">Generado automáticamente por Aventura Diferencial 2D.</p></main></body></html>`;
+    return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Informe Aventura Diferencial</title>${mjConfig}<style>*{box-sizing:border-box}body{margin:0;background:#f5f8ff;color:#10243d;font-family:Georgia,'Times New Roman',serif;line-height:1.58}.page{width:min(1040px,calc(100% - 24px));margin:22px auto 56px}.hero,.section,.question-card{background:white;border:1px solid #dfe8f5;border-radius:22px;padding:24px;margin:20px 0;box-shadow:0 10px 28px rgba(8,35,74,.07)}.hero{background:linear-gradient(145deg,#06184c,#112f7a);color:white;text-align:center}.hero h1{font-size:clamp(2rem,5vw,4rem);margin:8px 0;color:#ffd866}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric{background:#082d76;color:white;border-radius:16px;padding:16px}.metric b{display:block;font-size:1.7rem;color:#ffd866}h2{color:#062f8a;border-bottom:3px solid #dfe8f5;padding-bottom:8px}.invalidated-section{border:3px solid #d40000;background:#ffe5e5;color:#7f0000}.invalidated-section h2{color:#b00000;border-bottom-color:#ffb4b4}.latex,.solution{background:#f7fbff;border:1px solid #dfe8f5;border-radius:14px;padding:13px;margin:10px 0;overflow-x:auto}table{width:100%;border-collapse:collapse;background:white;border-radius:14px;overflow:hidden}td,th{border-bottom:1px solid #e7edf5;padding:10px;text-align:left}th{background:#062f8a;color:white}.qtop{display:flex;gap:12px;align-items:center}.qtop span{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;background:#062f8a;color:white;font-weight:900}.qtop h3{margin:0;color:#062f8a}.qtop p{margin:2px 0 0;color:#5c6f8c}.qtop b{margin-left:auto;padding:8px 13px;border-radius:999px}.ok{background:#e4f8ee;color:#0b754f}.bad{background:#ffe7ed;color:#a80f32}.twocol,.formula-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.formula-block{background:#fbfdff;border:1px solid #dfe8f5;border-radius:16px;padding:14px}.formula-block h3{margin:0 0 10px;color:#0a357d}.formula-block ul{margin:0;padding-left:18px}.formula-block li{margin:8px 0}.footer{text-align:right;color:#667}mjx-container{font-size:118% !important}.latex mjx-container,.solution mjx-container{font-size:122% !important}.formula-block .latex{font-size:1.05rem}@media(max-width:760px){.metrics,.twocol,.formula-grid{grid-template-columns:1fr}.hero,.section,.question-card{padding:16px}}</style></head><body><main class="page"><section class="hero"><div style="font-size:58px">🐉📐</div><h1>Informe Aventura Diferencial</h1><p>Primer corte · Ecuaciones Diferenciales</p><p>${escapeHTML(r.date)}</p></section>${invalidatedNotice}<section class="section"><h2>Resumen</h2><div class="metrics"><div class="metric"><b>${r.grade.toFixed(2)}</b><span>Nota final / 5.0</span></div><div class="metric"><b>${r.correct}/${r.total}</b><span>Aciertos</span></div><div class="metric"><b>${r.seals.filter(s=>s!=='boss').length}/5</b><span>Sellos</span></div><div class="metric"><b>${r.time}</b><span>Tiempo</span></div></div><p><strong>Estado:</strong> ${reportStatusLabel(r)} · <strong>Errores:</strong> ${r.wrong} · <strong>Precisión:</strong> ${Math.round(r.accuracy*100)}%</p></section>${progressSection}<section class="section"><h2>Desempeño por tema</h2><table><tr><th>Tema</th><th>Aciertos</th><th>Porcentaje</th></tr>${rows}</table></section><section class="section"><h2>Plan de mejora</h2>${rec}</section><section class="section"><h2>Formulario teórico en LaTeX</h2><p>Resumen de fórmulas importantes de los temas evaluados en la partida.</p><div class="formula-grid"><div class="formula-block"><h3>PVI</h3><ul><li class="latex">${reportMath('y^{\\prime}=f(x,y),\\quad y(x_0)=y_0')}</li><li>La unicidad local se garantiza con hipótesis suficientes sobre ${reportMath('f')} y ${reportMath('f_y')}.</li></ul></div><div class="formula-block"><h3>Separables</h3><ul><li class="latex">${reportMath('y^{\\prime}=g(x)h(y)\\quad\\Longrightarrow\\quad \\frac{dy}{h(y)}=g(x)\\,dx')}</li></ul></div><div class="formula-block"><h3>Exactas</h3><ul><li class="latex">${reportMath('M(x,y)\\,dx+N(x,y)\\,dy=0,\\quad M_y=N_x')}</li><li>Se busca ${reportMath('F')} con ${reportMath('F_x=M')} y ${reportMath('F_y=N')}.</li></ul></div><div class="formula-block"><h3>Lineales</h3><ul><li class="latex">${reportMath('y^{\\prime}+p(x)y=q(x),\\quad \\mu(x)=e^{\\int p(x)\\,dx}')}</li></ul></div><div class="formula-block"><h3>Aplicaciones</h3><ul><li>Mezclas: ${reportMath('A^{\\prime}(t)=\\text{entrada}-\\text{salida}')}.</li><li>Trayectorias ortogonales: ${reportMath('m_{\\perp}=-\\frac{1}{m}')}.</li></ul></div></div></section><section class="section"><h2>Detalle de preguntas</h2>${detail}</section><p class="footer">Generado automáticamente por Aventura Diferencial 2D.</p></main></body></html>`;
   }
 
   function downloadReportHTML(data=null){
@@ -2340,7 +2447,8 @@ Acceso restringido.`);
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     a.href=url;
-    a.download=`informe-aventura-diferencial-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.html`;
+    const prefix=r.invalidated?'informe-quiz-anulado-aventura-diferencial':'informe-aventura-diferencial';
+    a.download=`${prefix}-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.html`;
     document.body.appendChild(a);
     a.click();
     a.remove();
