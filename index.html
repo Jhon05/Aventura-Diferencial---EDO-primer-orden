@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Aventura Diferencial 2D · Primer Corte V34</title>
+  <meta name="description" content="Juego educativo tipo Zelda/Pokémon 2D para evaluar el primer corte de Ecuaciones Diferenciales." />
+  <link rel="stylesheet" href="styles.css" />
+  <script>
+    window.MathJax = {
+      tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$','$$'], ['\\[','\\]']] },
+      chtml: { scale: 1.05, mtextInheritFont: true },
+      startup: { typeset: false }
+    };
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+</head>
+<body>
+  <div id="game-root" class="menu-mode">
+    <canvas id="game" aria-label="Aventura Diferencial 2D"></canvas>
+
+    <section id="main-menu" class="panel menu-panel">
+      <div class="title-badge">Primer corte · Ecuaciones Diferenciales</div>
+      <h1>Aventura Diferencial 2D</h1>
+      <p class="subtitle">
+        Explora cinco regiones elementales con acertijos tipo Pokémon/Zelda: bosque, mar, volcán, cueva y polo norte; cada guardián tiene forma de bestia mitológica.
+        Cada cueva tiene muchas trampas de movimiento antes de llegar a las preguntas; debes evitarlas con habilidad y en varias zonas debes empujar piedras para tapar huecos y crear camino seguro.
+      </p>
+
+      <div class="menu-grid">
+        <label>Nombre del estudiante
+          <input id="studentName" maxlength="48" placeholder="Escribe tu nombre" />
+        </label>
+        <label>Modo de control
+          <select id="controlMode">
+            <option value="auto">Automático</option>
+            <option value="desktop">PC / teclado</option>
+            <option value="mobile">Celular / tablet</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="menu-actions">
+        <button id="startBtn" class="primary">Iniciar aventura</button>
+        <button id="howToBtn">Cómo jugar</button>
+        <button id="routeBtn">Ruta del primer corte</button>
+      </div>
+      <p class="tiny">PC: flechas/WASD para moverse · E/Espacio para interactuar · M mapa · R reporte. El juego intenta entrar en pantalla completa al iniciar. En móvil se activan botones táctiles.</p>
+    </section>
+
+    <aside id="hud" class="hud hidden">
+      <div class="hud-topline">
+        <div class="hud-row hud-stats">
+          <div class="stat"><span>Nota</span><strong id="gradeText">0.0</strong></div>
+          <div class="stat"><span>Sellos</span><strong id="sealsText">0/5</strong></div>
+          <div class="stat"><span>Aciertos</span><strong id="correctText">0</strong></div>
+          <div class="stat"><span>Errores</span><strong id="wrongText">0</strong></div>
+        </div>
+        <div id="worldRestartBox" class="world-restart hidden">
+          <button id="worldRestartBtn">Reiniciar mundo (-0.1)</button>
+          <button id="finishGameBtn" class="primary">Finalizar juego</button>
+        </div>
+      </div>
+      <div class="hud-row small">
+        <span id="chapterText">Reino del Primer Corte</span>
+        <span id="hintText">Busca la primera región.</span>
+      </div>
+    </aside>
+
+    <aside id="compass" class="compass hidden">
+      <div class="compass-face"><div id="compassArrow" class="compass-arrow">➤</div></div>
+      <div id="compassLabel" class="compass-label">Objetivo</div>
+    </aside>
+
+    <section id="toast" class="toast hidden" role="status"></section>
+
+    <section id="securityPanel" class="security-panel hidden" role="dialog" aria-modal="true" aria-labelledby="securityTitle">
+      <div class="security-card">
+        <h2 id="securityTitle">Actividad bloqueada</h2>
+        <p id="securityMessageText">Actividad bloqueada. Escriba la contraseña docente para continuar.</p>
+        <p class="security-warnings">Señales de bloqueo: <b id="securitySignalsText">0/5</b></p>
+        <label class="security-pass-label">
+          Contraseña docente
+          <input id="teacherPasswordInput" type="password" inputmode="numeric" autocomplete="off" placeholder="****" />
+        </label>
+        <div class="security-actions">
+          <button id="unlockSecurityBtn" class="primary">Desbloquear y continuar</button>
+        </div>
+        <p class="tiny">Escriba la contraseña docente para continuar.</p>
+      </div>
+    </section>
+
+
+    <section id="questionModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="qTitle">
+      <div class="modal-card question-card">
+        <div class="modal-head">
+          <span id="qTopic" class="pill">Tema</span>
+          <span id="qType" class="pill muted">Tipo</span>
+        </div>
+        <h2 id="qTitle">Reto diferencial</h2>
+        <div id="qPrompt" class="math-prompt"></div>
+        <div id="qAnswerArea" class="answer-area"></div>
+        <div class="question-tools">
+          <button id="hintBtn">Ver pista</button>
+          <button id="submitAnswer" class="primary">Responder</button>
+          <button id="closeQuestionBtn" class="hidden" aria-hidden="true" tabindex="-1">Continuar jugando</button>
+        </div>
+        <div id="qHint" class="hint-box hidden"></div>
+        <p class="tiny" style="margin-top:10px"><b>Importante:</b> debes responder obligatoriamente para continuar; no se puede cerrar la pregunta.</p>
+        <div id="qFeedback" class="feedback hidden"></div>
+      </div>
+    </section>
+
+    <section id="howToPanel" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-card guide-card">
+        <h2>Cómo jugar</h2>
+        <p><b>Aventura Diferencial 2D</b> evalúa únicamente el <b>primer corte de Ecuaciones Diferenciales</b>. No basta con responder preguntas: antes debes superar acertijos de movimiento inspirados en cuevas de Pokémon y mazmorras 2D.</p>
+        <div class="info-grid">
+          <div class="callout">
+            <h3>Objetivo</h3>
+            <ul>
+              <li>Recorre el mapa principal.</li>
+              <li>Entra a las cinco regiones elementales.</li>
+              <li>Supera trampas de movilidad.</li>
+              <li>Resuelve preguntas variadas y consigue sellos.</li>
+              <li>Con los cinco sellos, entra a la pirámide central, abre cinco puertas con los sellos y enfrenta el monstruo final.</li>
+            </ul>
+          </div>
+          <div class="callout">
+            <h3>Nota</h3>
+            <ul>
+              <li>Respuesta correcta: <b>+0.1</b>.</li>
+              <li>Respuesta incorrecta: <b>-0.1</b>, sin límite de intentos.</li>
+              <li>La nota se mantiene entre <b>0.0</b> y <b>5.0</b>.</li>
+              <li>Las preguntas incluyen pista y retroalimentación.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="callout">
+          <h3>Tipos de preguntas</h3>
+          <ul>
+            <li>Opción múltiple con <b>6 respuestas parecidas</b>.</li>
+            <li>Verdadero/Falso con <b>lista desplegable</b>.</li>
+            <li>Afirmaciones <b>I, II, III y IV</b>, cada una marcada como verdadera o falsa.</li>
+            <li>Respuesta de <b>valor entero</b>.</li>
+            <li><b>Comprobación de soluciones:</b> dada una ecuación diferencial y varias funciones candidatas, se elige cuál realmente satisface la ecuación y, cuando aplique, el dato inicial.</li>
+          </ul>
+        </div>
+        <div class="callout">
+          <h3>Trampas, acertijos y supervivencia</h3>
+          <ul>
+            <li><b>Bosque:</b> muchas piedras bloquean el camino y hay múltiples trampas ocultas en la ruta.</li>
+            <li><b>Mar:</b> islas separadas, corrientes y un barco que transporta al guardián de una isla pequeña.</li>
+            <li><b>Volcán:</b> abundan los pisos agrietados y trampas profundas; al caer debes responder bien para salir.</li>
+            <li><b>Cueva:</b> laberinto oscuro con rocas empujables y varios huecos-trampa.</li>
+            <li><b>Espacio aéreo:</b> debes subir a un avión y volar entre islas tipo nubes; las corrientes de aire y trampas te pueden bloquear.</li>
+          </ul>
+          <p><b>Regla de trampa:</b> si caes en un hueco, no quedas bloqueado. Aparece una pregunta de liberación. Si fallas, el hueco se expande; la escalera permanece en el centro, pero hasta que respondas bien no puedes usarla para salir.</p>
+        </div>
+        <p class="tiny">La brújula apunta al siguiente objetivo, pero el camino puede requerir resolver primero el acertijo del entorno: mover piedras, usar barcos o aviones, cruzar corrientes, evitar lava y superar bloqueos de trampas.</p>
+        <div class="modal-actions"><button id="closeHowTo" class="primary">Entendido</button></div>
+      </div>
+    </section>
+
+    <section id="routePanel" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-card guide-card">
+        <h2>Ruta del primer corte</h2>
+        <ol>
+          <li><b>Bosque del PVI:</b> nociones generales, PVI, existencia y unicidad.</li>
+          <li><b>Mar de Variables Separables:</b> ecuaciones de variables separables.</li>
+          <li><b>Cueva Exacta:</b> homogéneas, exactas y factor integrante; estructura de laberinto oscuro con rocas.</li>
+          <li><b>Volcán Lineal:</b> lineales de primer orden y Bernoulli.</li>
+          <li><b>Cielo de Aplicaciones:</b> trayectorias ortogonales, mezclas y poblaciones en un mundo aéreo con avión y nubes.</li>
+          <li><b>Pirámide Central del Primer Parcial:</b> repaso acumulativo.</li>
+        </ol>
+        <div class="modal-actions"><button id="closeRoute" class="primary">Volver</button></div>
+      </div>
+    </section>
+
+    <section id="reportPanel" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-card report-card">
+        <h2>Informe final</h2>
+        <div id="reportBody"></div>
+        <div class="modal-actions">
+          <button id="continueBtn">Continuar</button>
+          <button id="printBtn" class="primary">Imprimir / guardar PDF</button>
+          <button id="downloadJsonBtn">Descargar JSON</button>
+          <button id="restartBtn">Reiniciar</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="victoryPanel" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="victoryTitle">
+      <div class="modal-card victory-card">
+        <div class="victory-icon">🏆🐉</div>
+        <h2 id="victoryTitle">¡Monstruo final derrotado!</h2>
+        <p>Felicitaciones. Has colocado los cinco sellos, vencido al guardián de la pirámide central y terminado la aventura.</p>
+        <p>La nota final queda fijada en <b>5.0</b>. Ahora se generará el informe HTML con el formato académico solicitado.</p>
+        <div class="modal-actions">
+          <button id="victoryReportBtn" class="primary">Generar informe HTML</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="rescuePanel" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="rescueTitle">
+      <div class="modal-card guide-card">
+        <h2 id="rescueTitle">Atrapado en aguas movedizas</h2>
+        <p>Quedaste atrapado en una zona de corrientes del <b>Mar de Variables Separables</b>.</p>
+        <p>Para continuar, debes reiniciar este nivel del mundo. Al hacerlo, <b>pierdes 0.1</b> en la nota actual.</p>
+        <div class="callout">
+          <h3>Penalización</h3>
+          <ul>
+            <li>Se reinicia únicamente el nivel actual del mar.</li>
+            <li>La nota disminuye en <b>0.1</b> (sin bajar de 0.0).</li>
+            <li>Conservas tu avance general, aciertos, errores y sellos ya obtenidos.</li>
+          </ul>
+        </div>
+        <div class="modal-actions">
+          <button id="rescueRestartBtn" class="primary">Reiniciar nivel del mar (-0.1)</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="mobileControls" class="mobile-controls hidden" aria-label="controles táctiles">
+      <div class="dpad">
+        <button data-dir="up">▲</button>
+        <button data-dir="left">◀</button>
+        <button data-dir="down">▼</button>
+        <button data-dir="right">▶</button>
+      </div>
+      <div class="action-pad">
+        <button id="mobileMap">Mapa</button>
+        <button id="mobileAction" class="primary">Acción</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="scorm.js"></script>
+  <script src="questions.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
